@@ -2030,6 +2030,12 @@
     let currentSort = 'points';
     let filteredData = null;
 
+    // GitHub API headers
+    const apiHeaders = {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'AnimateItNow-Leaderboard'
+    };
+
     // --- UTILITY FUNCTIONS ---
     function scrollToTop() {
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2045,57 +2051,100 @@
     async function fetchAllPages(url) {
         let results = [];
         let page = 1;
-        while (true) {
-            const response = await fetch(`${url}&page=${page}`);
-            if (response.status === 403) {
-                const rateLimitReset = response.headers.get('X-RateLimit-Reset');
-                const resetTime = new Date(parseInt(rateLimitReset) * 1000);
-                throw new Error(`GitHub API rate limit exceeded. Please try again after ${resetTime.toLocaleTimeString()}`);
+        const maxPages = 10; // Safety limit
+        
+        while (page <= maxPages) {
+            try {
+                const pageUrl = url.includes('?') ? `${url}&page=${page}` : `${url}?page=${page}`;
+                const response = await fetch(pageUrl, { headers: apiHeaders });
+                
+                // Check rate limit
+                const remaining = response.headers.get('X-RateLimit-Remaining');
+                const resetTime = response.headers.get('X-RateLimit-Reset');
+                
+                if (response.status === 403) {
+                    if (resetTime) {
+                        const resetDate = new Date(parseInt(resetTime) * 1000);
+                        throw new Error(`GitHub API rate limit exceeded. Please try again after ${resetDate.toLocaleTimeString()}`);
+                    }
+                    throw new Error(`GitHub API error! Status: ${response.status}. Rate limit may be exceeded.`);
+                }
+                
+                if (!response.ok) {
+                    throw new Error(`GitHub API error! Status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                // Check if we have data
+                if (!Array.isArray(data) || data.length === 0) {
+                    break; // No more pages
+                }
+                
+                results = results.concat(data);
+                
+                // If we got less than 100 items, we're likely on the last page
+                if (data.length < 100) {
+                    break;
+                }
+                
+                page++;
+            } catch (error) {
+                console.error(`Error fetching page ${page}:`, error);
+                throw error;
             }
-            if (!response.ok) throw new Error(`GitHub API error! Status: ${response.status}`);
-            
-            const data = await response.json();
-            if (data.length === 0) break;
-            
-            results = results.concat(data);
-            page++;
         }
+        
         return results;
     }
 
     function calculateContributorData(contributions) {
         const data = {};
         contributions.forEach(item => {
+            // Handle both PRs (item.user) and issues (item.user)
+            // Skip if no user or if it's a PR that wasn't merged (for PRs)
             if (!item.user || !item.user.login) return;
+            
+            // For PRs, only count merged ones (already filtered, but double-check)
+            if (item.pull_request && !item.merged_at) return;
+            
             const user = item.user.login;
+            const avatar = item.user.avatar_url || 'https://github.com/identicons/' + user + '.png';
             
             if (!data[user]) {
-                data[user] = { contributions: [], total: 0, avatar: item.user.avatar_url };
+                data[user] = { contributions: [], total: 0, avatar: avatar };
             }
             
-            const labels = item.labels.map(label => label.name.toLowerCase());
+            // Get labels (both PRs and issues have labels)
+            const labels = (item.labels || []).map(label => 
+                typeof label === 'string' ? label.toLowerCase() : label.name.toLowerCase()
+            );
+            
             let points = 0;
             let contributionType = 'unknown';
 
+            // Check for level labels first
             const levelLabel = labels.find(l => l.startsWith("level") && pointsPerLevel[l]);
             if (levelLabel) {
                 points = pointsPerLevel[levelLabel];
                 contributionType = levelLabel;
             } else {
+                // Check for other matching labels
                 const matchedLabel = labels.find(l => pointsPerLevel[l]);
                 if (matchedLabel) {
                     points = pointsPerLevel[matchedLabel];
                     contributionType = matchedLabel;
                 } else {
-                    points = item.pull_request ? 5 : 2; // Default points for PR or issue
+                    // Default points: PRs get 5, issues get 2
+                    points = item.pull_request ? 5 : 2;
                     contributionType = item.pull_request ? 'pull_request' : 'issue';
                 }
             }
             
             if (points > 0) {
                 data[user].contributions.push({
-                    title: item.title,
-                    url: item.html_url,
+                    title: item.title || 'Untitled',
+                    url: item.html_url || '#',
                     points,
                     type: contributionType
                 });
@@ -2231,35 +2280,86 @@
         }
 
         try {
-            console.log("Fetching fresh data from GitHub...");
-            const prUrl = `https://api.github.com/repos/${owner}/${repo}/pulls?state=closed&per_page=100`;
-            const mergedPRs = (await fetchAllPages(prUrl)).filter(pr => pr.merged_at);
+            console.log("🔄 Fetching fresh data from GitHub...");
             
-            const data = calculateContributorData(mergedPRs);
+            // Fetch merged pull requests
+            const prUrl = `https://api.github.com/repos/${owner}/${repo}/pulls?state=closed&per_page=100`;
+            const allPRs = await fetchAllPages(prUrl);
+            const mergedPRs = allPRs.filter(pr => pr.merged_at);
+            
+            console.log(`📊 Found ${mergedPRs.length} merged PRs`);
+            
+            // Fetch closed issues for additional contribution tracking
+            let allIssues = [];
+            try {
+                const issuesUrl = `https://api.github.com/repos/${owner}/${repo}/issues?state=closed&per_page=100`;
+                allIssues = await fetchAllPages(issuesUrl);
+                // Filter out PRs (issues that are actually PRs have pull_request field)
+                const actualIssues = allIssues.filter(issue => !issue.pull_request);
+                console.log(`📋 Found ${actualIssues.length} closed issues`);
+            } catch (issueError) {
+                console.warn("⚠️ Could not fetch issues:", issueError);
+                // Continue with just PRs
+            }
+            
+            // Combine PRs and issues for calculation
+            const allContributions = [...mergedPRs, ...allIssues];
+            const data = calculateContributorData(allContributions);
             
             if (data.length === 0) {
-                document.querySelector("#pointsTable tbody").innerHTML = `<tr><td colspan="4" style="text-align:center;padding:40px;">No contributions found yet! Be the first!</td></tr>`;
+                document.querySelector("#pointsTable tbody").innerHTML = `
+                    <tr><td colspan="4" style="text-align:center;padding:40px;">
+                        <div style="font-size: 1.1rem; margin-bottom: 10px;">📭</div>
+                        <div>No contributions found yet! Be the first contributor!</div>
+                    </td></tr>
+                `;
+                updateStats([]);
+                setupEventListeners();
                 return;
             }
 
             contributorsData = data;
-            sessionStorage.setItem(cacheKey, JSON.stringify({ timestamp: new Date().getTime(), data }));
-            console.log("💾 Data saved to cache!");
+            sessionStorage.setItem(cacheKey, JSON.stringify({ 
+                timestamp: new Date().getTime(), 
+                data 
+            }));
+            console.log(`✅ Data saved to cache! Found ${data.length} contributors`);
 
             updateStats(contributorsData);
             renderTablePage(1);
             setupEventListeners();
 
         } catch (error) {
-            console.error('Error initializing leaderboard:', error);
-            document.querySelector("#pointsTable tbody").innerHTML = `
-                <tr><td colspan="4" style="text-align: center; padding: 40px;">
-                    <div style="font-size: 3rem; margin-bottom: 20px;">⚠️</div>
-                    <div style="font-size: 1.2rem; font-weight: 600; color: #dc3545;">Error Loading Data</div>
-                    <div style="font-size: 0.9rem; color: var(--text-light); margin-bottom: 20px;">${error.message}</div>
-                    <button onclick="sessionStorage.removeItem('${cacheKey}'); location.reload();" class="btn">Force Retry</button>
-                </td></tr>
-            `;
+            console.error('❌ Error initializing leaderboard:', error);
+            
+            // Try to use expired cache if available
+            if (cachedItem) {
+                const { data } = JSON.parse(cachedItem);
+                console.warn("⚠️ Using expired cache due to API error");
+                contributorsData = data;
+                updateStats(contributorsData);
+                renderTablePage(1);
+                setupEventListeners();
+                return;
+            }
+            
+            const tbody = document.querySelector("#pointsTable tbody");
+            if (tbody) {
+                tbody.innerHTML = `
+                    <tr><td colspan="4" style="text-align: center; padding: 40px;">
+                        <div style="font-size: 3rem; margin-bottom: 20px;">⚠️</div>
+                        <div style="font-size: 1.2rem; font-weight: 600; color: #dc3545; margin-bottom: 10px;">Error Loading Data</div>
+                        <div style="font-size: 0.9rem; color: var(--text-light); margin-bottom: 20px;">${error.message}</div>
+                        <button onclick="sessionStorage.removeItem('${cacheKey}'); location.reload();" 
+                                style="padding: 10px 20px; background: #6C63FF; color: white; border: none; border-radius: 5px; cursor: pointer; margin-top: 10px;">
+                            Force Retry
+                        </button>
+                    </td></tr>
+                `;
+            }
+            
+            // Update stats to show zeros
+            updateStats([]);
         }
     }
 

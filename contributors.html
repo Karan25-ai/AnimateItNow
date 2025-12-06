@@ -809,118 +809,107 @@
       let contributorsData = [];
       let filteredContributors = [];
 
-      // Fetch contributors from GitHub API
+      // GitHub API headers
+      const apiHeaders = {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'AnimateItNow-Contributors'
+      };
+
+      // Fetch all pages of contributors
+      async function fetchAllContributors() {
+        let allContributors = [];
+        let page = 1;
+        const perPage = 100;
+
+        while (true) {
+          try {
+            const url = `https://api.github.com/repos/${owner}/${repo}/contributors?per_page=${perPage}&page=${page}`;
+            const response = await fetch(url, { headers: apiHeaders });
+
+            // Check rate limit
+            const remaining = response.headers.get('X-RateLimit-Remaining');
+            const resetTime = response.headers.get('X-RateLimit-Reset');
+            
+            if (response.status === 403) {
+              if (resetTime) {
+                const resetDate = new Date(parseInt(resetTime) * 1000);
+                throw new Error(`GitHub API rate limit exceeded. Please try again after ${resetDate.toLocaleTimeString()}`);
+              }
+              throw new Error(`GitHub API error! Status: ${response.status}. Rate limit may be exceeded.`);
+            }
+
+            if (!response.ok) {
+              throw new Error(`GitHub API error! Status: ${response.status}`);
+            }
+
+            const contributors = await response.json();
+
+            if (!Array.isArray(contributors) || contributors.length === 0) {
+              break; // No more pages
+            }
+
+            allContributors = allContributors.concat(contributors);
+            
+            // If we got less than perPage, we're on the last page
+            if (contributors.length < perPage) {
+              break;
+            }
+
+            page++;
+            
+            // Safety limit
+            if (page > 10) break;
+          } catch (error) {
+            console.error("Error fetching contributors:", error);
+            throw error;
+          }
+        }
+
+        return allContributors;
+      }
+
+      // Fetch contributors from GitHub API with caching
       async function fetchContributors() {
+        const cacheKey = `contributors_${owner}_${repo}`;
+        const cacheDuration = 30 * 60 * 1000; // 30 minutes
+        const cachedItem = sessionStorage.getItem(cacheKey);
+
+        // Check cache first
+        if (cachedItem) {
+          const { timestamp, data } = JSON.parse(cachedItem);
+          if (new Date().getTime() - timestamp < cacheDuration) {
+            console.log("📦 Loading contributors from cache");
+            return data;
+          }
+        }
+
         try {
-          const url = `https://api.github.com/repos/${owner}/${repo}/contributors`;
-          const response = await fetch(url);
+          console.log("🔄 Fetching contributors from GitHub API...");
+          const contributors = await fetchAllContributors();
 
-          if (!response.ok) {
-            throw new Error(`GitHub API error! Status: ${response.status}`);
-          }
-
-          const contributors = await response.json();
-
-          // If no data fetched, use dummy data for demonstration
           if (!Array.isArray(contributors) || contributors.length === 0) {
-            console.warn(
-              "No data fetched from GitHub. Using dummy data for demonstration."
-            );
-            return getDummyContributors();
+            throw new Error("No contributors found in repository");
           }
 
+          // Cache the data
+          sessionStorage.setItem(cacheKey, JSON.stringify({
+            timestamp: new Date().getTime(),
+            data: contributors
+          }));
+
+          console.log(`✅ Fetched ${contributors.length} contributors`);
           return contributors;
         } catch (error) {
           console.error("Error fetching contributors:", error);
-          // Return dummy data if fetch fails
-          return getDummyContributors();
-        }
-      }
-
-      // Get dummy contributors for demonstration
-      function getDummyContributors() {
-        return [
-          {
-            login: "anuj",
-            id: 1,
-            avatar_url: "https://via.placeholder.com/100/4f8cff/ffffff?text=A",
-            html_url: "https://github.com/anuj",
-            contributions: 150,
-            type: "User",
-          },
-          {
-            login: "alice",
-            id: 2,
-            avatar_url: "https://via.placeholder.com/100/2563eb/ffffff?text=A",
-            html_url: "https://github.com/alice",
-            contributions: 89,
-            type: "User",
-          },
-          {
-            login: "bob",
-            id: 3,
-            avatar_url: "https://via.placeholder.com/100/1dc5c8/ffffff?text=B",
-            html_url: "https://github.com/bob",
-            contributions: 76,
-            type: "User",
-          },
-          {
-            login: "charlie",
-            id: 4,
-            avatar_url: "https://via.placeholder.com/100/4f8cff/ffffff?text=C",
-            html_url: "https://github.com/charlie",
-            contributions: 64,
-            type: "User",
-          },
-          {
-            login: "diana",
-            id: 5,
-            avatar_url: "https://via.placeholder.com/100/2563eb/ffffff?text=D",
-            html_url: "https://github.com/diana",
-            contributions: 52,
-            type: "User",
-          },
-          {
-            login: "emma",
-            id: 6,
-            avatar_url: "https://via.placeholder.com/100/1dc5c8/ffffff?text=E",
-            html_url: "https://github.com/emma",
-            contributions: 41,
-            type: "User",
-          },
-          {
-            login: "frank",
-            id: 7,
-            avatar_url: "https://via.placeholder.com/100/4f8cff/ffffff?text=F",
-            html_url: "https://github.com/frank",
-            contributions: 35,
-            type: "User",
-          },
-          {
-            login: "grace",
-            id: 8,
-            avatar_url: "https://via.placeholder.com/100/2563eb/ffffff?text=G",
-            html_url: "https://github.com/grace",
-            contributions: 28,
-            type: "User",
-          },
-        ];
-      }
-
-      // Fetch additional user details
-      async function fetchUserDetails(login) {
-        try {
-          const url = `https://api.github.com/users/${login}`;
-          const response = await fetch(url);
-
-          if (!response.ok) {
-            return null;
+          
+          // Try to use cached data even if expired
+          if (cachedItem) {
+            const { data } = JSON.parse(cachedItem);
+            console.warn("⚠️ Using expired cache due to API error");
+            return data;
           }
-
-          return await response.json();
-        } catch (error) {
-          console.error(`Error fetching user details for ${login}:`, error);
-          return null;
+          
+          throw error;
         }
       }
 
@@ -960,13 +949,13 @@
               </div>
               <div class="contributor-stat">
                 <div class="contributor-stat-value">${
-                  contributor.public_repos || "N/A"
+                  contributor.public_repos || "-"
                 }</div>
                 <div class="contributor-stat-label">Repos</div>
               </div>
               <div class="contributor-stat">
                 <div class="contributor-stat-value">${
-                  contributor.followers || "N/A"
+                  contributor.followers || "-"
                 }</div>
                 <div class="contributor-stat-label">Followers</div>
               </div>
@@ -1017,9 +1006,7 @@
         } else {
           filteredContributors = contributorsData.filter(
             (contributor) =>
-              contributor.login.toLowerCase().includes(searchTerm) ||
-              (contributor.name &&
-                contributor.name.toLowerCase().includes(searchTerm))
+              contributor.login.toLowerCase().includes(searchTerm)
           );
         }
 
@@ -1028,23 +1015,38 @@
 
       // Initialize contributors page
       async function init() {
-        const contributors = await fetchContributors();
+        try {
+          const contributors = await fetchContributors();
 
-        // Fetch additional details for each contributor
-        const contributorsWithDetails = await Promise.all(
-          contributors.map(async (contributor) => {
-            const userDetails = await fetchUserDetails(contributor.login);
-            return { ...contributor, ...userDetails };
-          })
-        );
+          // Contributors endpoint already includes: login, avatar_url, html_url, contributions, type
+          // No need for additional API calls per user
+          contributorsData = contributors.sort(
+            (a, b) => b.contributions - a.contributions
+          );
+          filteredContributors = [...contributorsData];
 
-        contributorsData = contributorsWithDetails.sort(
-          (a, b) => b.contributions - a.contributions
-        );
-        filteredContributors = [...contributorsData];
-
-        updateStats(contributorsData);
-        renderContributors(filteredContributors);
+          updateStats(contributorsData);
+          renderContributors(filteredContributors);
+        } catch (error) {
+          console.error("Error initializing contributors:", error);
+          const grid = document.getElementById("contributors-grid");
+          if (grid) {
+            grid.innerHTML = `
+              <div class="loading-state" style="text-align: center; padding: 40px;">
+                <div style="font-size: 3rem; margin-bottom: 20px;">⚠️</div>
+                <div style="font-size: 1.2rem; font-weight: 600; color: #dc3545; margin-bottom: 10px;">Error Loading Contributors</div>
+                <div style="font-size: 0.9rem; color: var(--text-light); margin-bottom: 20px;">${error.message}</div>
+                <button onclick="sessionStorage.clear(); location.reload();" style="padding: 10px 20px; background: #6C63FF; color: white; border: none; border-radius: 5px; cursor: pointer;">Retry</button>
+              </div>
+            `;
+          }
+          
+          // Show error in stats
+          document.getElementById("totalContributors").textContent = "0";
+          document.getElementById("totalCommits").textContent = "0";
+          document.getElementById("totalPRs").textContent = "0";
+          return;
+        }
 
         // Set up search functionality
         document
